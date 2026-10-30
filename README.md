@@ -1,143 +1,85 @@
 # herdr-import
 
-Bring the spaces, tabs and agent sessions you set up in **herdr** (the TUI) into
-**herdr-app** and **herdr-core** (`hc`, the GUI's background program).
+Bring the spaces, tabs and agent sessions you built in **herdr** (the TUI) into
+**Herdr**. One dialog in the window, one click: each agent resumes the
+conversation it left, in place, and herdr is left exactly as it was.
 
-herdr and herdr-app keep separate state and neither imports the other. This tool
-reads herdr's live state and creates the same shape in herdr-app: one space per
-workspace, one tab per tab, one terminal per pane, and each agent pane back with
-its conversation.
+No command line. The whole thing is one folder of JavaScript — a Herdr mod.
 
-## From the app, no terminal
-
-The app's plugins are mods. Install this one once and the whole handover is
-three clicks:
+## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/arhen/herdr-import/main/install.sh | sh
+cp -R mod ~/.config/herdr-app/mods/herdr-import
 ```
 
-That puts the mod in `~/.config/herdr-app/mods/herdr-import` and the command in
-`~/.local/bin/herdr-import`. It keeps an existing copy aside instead of
-overwriting it, and prints what it placed. Nothing else on your machine is
-touched: no `sudo`, no git, no daemon.
+Nothing else: no dependencies, no daemon, no binary. Herdr picks it up on save.
 
-Then in Herdr: **Shift P** (commands) → `mod.open herdr-import` → tick what
-comes over → **Import**. A dialog lists every herdr workspace with its folder,
-tab and agent count. Anything herdr still runs is marked and cannot be picked,
-with the reason: one session cannot be resumed in two places. Close that tab in
-herdr and the row frees up.
+## Use
 
-The mod calls the same script, so there is nothing to paste into a shell and no
-terminal to keep open. It works with herdr already closed, reading the state
-herdr left in `~/.config/herdr/session.json`.
+**Shift P** → `mod.open herdr-import` → tick the workspaces → **Import**.
 
-## From a terminal
+The dialog lists every herdr workspace with its folder, tab count and agent
+count. Rows that herdr is still running are marked and cannot be picked, with
+the reason: a session cannot be resumed in two places. Close that tab in herdr
+and the row frees up. Rows already in Herdr say so instead of making twins.
 
-Two ways to use it, depending on what you want:
+## What it does, and what it refuses
 
-```sh
-# 1. Move: import everything once, then live in herdr-app
-herdr-import                              # the plan, nothing written
-herdr-import --apply                      # create it in herdr-app
-herdr-import --apply --machines           # also add herdr's machines to herdr-core
-
-# 2. Both: keep using herdr, and keep herdr-app in step with it
-herdr-import --watch
-```
-
-`--watch` listens to herdr's event stream (`events.subscribe`) and mirrors
-new workspaces, new tabs and renames into herdr-app as they happen. Every event
-only invalidates a cache: the tool re-reads `herdr api snapshot`, herdr's own
-guidance for subscribers, and diffs it against the ledger. So a rename lands as
-a rename, a new workspace as a new space, and a reconnected watcher picks up
-whatever it missed.
-
-What `--watch` deliberately does not do:
-
-- **Never closes or kills anything.** A workspace that disappears from herdr only
-  gets marked stale in the ledger. Your terminals in the app keep running.
-- **No agent copies by default.** In watch mode a new tab opens as a shell, so
-  watching does not spawn a second `pi` per workspace. Pass `--agents resume`
-  to carry agents over, with the same fork rule as below.
-
-## What it does and does not touch
-
-- Reads herdr. Never writes to it, never stops it: herdr keeps running exactly
-  as it was.
-- Creates spaces in herdr-app. Nothing is merged, renamed or deleted.
-- Re-running is safe. A ledger at `~/.local/state/herdr-import/ledger.json`
-  remembers which herdr workspace became which space, so a second run skips
-  what is already there. Use `--force` to import one again.
-- Requires the Herdr window to be open: only the running window can create
-  spaces. `hc server status` must be up too (`hc server start`).
-
-## Agents carry over, even while they run
-
-herdr panes that are running an agent are imported as that agent, with the
-conversation:
-
-| herdr pane | becomes |
+| herdr | becomes |
 | --- | --- |
-| agent running now | `pi --fork <session file>`: a **copy** of the conversation |
-| agent finished | `pi --session <session file>`: the same conversation |
-| no agent | a shell in the same folder |
+| workspace with a name | space of that name |
+| workspace without one | space named after its folder |
+| tab | tab, in the same order, same folder |
+| pane with an agent | that agent, resumed: `pi --session <file>` |
+| pane without one | a shell in the same folder |
+| workspace already imported | left alone |
 
-Forking matters. Two programs appending to one session file corrupt it, so a
-pane that resumes a session herdr is *still running* would be a bug. `--fork`
-gives the new pane the history and its own file. Pass `--include-live` to
-resume the shared file anyway; the plan says so loudly when you do.
-
-Resume flags come from a small table (`pi`, `claude`, `codex`). An agent with no
-entry opens as a shell and the plan says why.
-
-## Options
-
-```
---in <file>        read a snapshot from a file instead of asking herdr
---apply            create them; without this nothing is written
---agents <mode>    resume (default) | shell | skip
---machines         hc machine add for machines herdr has and herdr-core does not
---only <ids>       comma list of herdr workspace ids, e.g. wK,wT
---force            re-import workspaces the ledger says are done
---include-live     let a pane resume a session herdr is running right now
---json             print the plan or the result as JSON
-```
-
-Exit codes: `0` done, `1` something failed (the rest still ran), `2` it could not
-start (no Herdr window, no core, bad snapshot).
+- **No copying, no forking.** A conversation is resumed from the file it lives
+  in. Two programs appending to one session file corrupt it, so a session herdr
+  still runs is refused, never duplicated.
+- **herdr is never written to.** It is read and left alone; its own state keeps
+  working if you go back.
+- **Nothing is deleted.** Import only creates spaces.
+- Works with herdr already closed: it then reads
+  `~/.config/herdr/session.json`, which is what the TUI leaves behind. That is
+  the safe moment — nothing is running, so everything can be resumed.
 
 ## Requirements
 
-- `herdr` and `herdr-app` on `PATH`, herdr TUI running (state comes from
-  `herdr api snapshot`), Herdr window open for `--apply`.
-- Node 18 or newer. No dependencies.
+- Herdr (the app). `hc` is already part of it.
+- The agent's own resume flag must exist. `pi`, `claude` and `codex` are known;
+  an agent without an entry opens as a shell and the row says why.
 
-## How it maps
+## Files
 
-| herdr | herdr-app |
-| --- | --- |
-| workspace (custom name) | space of that name |
-| workspace (no name) | space named after its folder |
-| tab | tab, in the same position |
-| tab with no name | left unnamed, as in herdr |
-| pane | terminal in that tab, same working directory |
-| pane with an agent | that agent, resumed or forked |
-| saved machine | `hc machine add <user@host> --name <label>` |
+```
+mod/
+  mod.json        the dialog this mod opens as
+  main.js         the whole importer, ~260 lines
+  jsconfig.json   what Herdr wrote beside the mod, kept as it is
+```
 
-Tabs with more than one pane are split to the right, one after another: the
-pane tree is flattened, because herdr's nested splits have no exact equivalent
-in the app's command set.
+**JavaScript, not TypeScript.** Every mod Herdr ships is `main.js` (21 of 21);
+the only `.ts` files in its `defaults/mods` are build-time asset generators. The
+app loads `main.js` from disk as-is and rewrites `gpui-kit.d.ts` and
+`herdr.d.ts` beside it on every start, so saving a file reloads it in place. A
+TypeScript mod would need a build step between save and reload, which is the
+loop the whole mod system is built on.
 
-## Why not a herdr-core feature
+You still get the typing: `// @ts-check` plus the generated declarations means
+`npx -p typescript@5 tsc -p jsconfig.json` type-checks plain JS against the real
+API. Herdr's own mods are not type-clean under it either — the shipped `agents`
+mod reports 107 errors, this one 46 — so treat it as editor help, not a gate.
+`herdr-app check mod` is the gate.
 
-herdr-core runs terminals; it does not own spaces or tabs, so an importer does
-not belong there. herdr-app owns them, which is where this belongs long term:
+`herdr-app check mod` loads and renders it once without the window.
 
-- `herdr api snapshot` already exposes everything needed, so nothing has to be
-  added to herdr.
-- herdr-app's welcome currently says "Your herdr workspaces stay where they
-  are; nothing moves over" (`defaults/frame/welcome/main.js`). Flipping that to
-  offer an import is the upstream change this tool argues for.
-- The same logic works as a herdr-app mod, which is how it can ship to people
-  who do not run Node scripts.
+## Why this is a mod and not a Herdr feature
+
+Upstream's `CONTRIBUTING.md`: *"If what you want can be done with a mod or a
+layout, build it... Issues that ask for a custom mod, or for a feature a mod can
+already do, get closed."* Importing is a mod, so it is one.
+
+What a mod cannot do is install another mod, so Herdr has no `mod.install
+owner/repo` the way herdr has `herdr plugin install`. Until it does, the folder
+above is the installation.
