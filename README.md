@@ -8,6 +8,29 @@ reads herdr's live state and creates the same shape in herdr-app: one space per
 workspace, one tab per tab, one terminal per pane, and each agent pane back with
 its conversation.
 
+## From the app, no terminal
+
+The app's plugins are mods. Install this one once and the whole handover is
+three clicks:
+
+```sh
+git clone https://github.com/arhen/herdr-import
+ln -s "$PWD/herdr-import/bin/herdr-import.js" ~/.local/bin/herdr-import
+ln -s "$PWD/herdr-import/mod" ~/.config/herdr-app/mods/herdr-import
+```
+
+Then in Herdr: **Shift P** (commands) → `mod.open herdr-import` → tick what
+comes over → **Import**. A dialog lists every herdr workspace with its folder,
+tab and agent count. Anything herdr still runs is marked and cannot be picked,
+with the reason: one session cannot be resumed in two places. Close that tab in
+herdr and the row frees up.
+
+The mod calls the same script, so there is nothing to paste into a shell and no
+terminal to keep open. It works with herdr already closed, reading the state
+herdr left in `~/.config/herdr/session.json`.
+
+## From a terminal
+
 Two ways to use it, depending on what you want:
 
 ```sh

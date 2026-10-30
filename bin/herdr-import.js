@@ -9,9 +9,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 const AGENTS = {
-  pi: { flag: "--session", fork: "--fork", kind: "path" },
-  "claude-code": { flag: "--resume", fork: "--fork-session", kind: "id" },
-  claude: { flag: "--resume", fork: "--fork-session", kind: "id" },
+  pi: { flag: "--session", kind: "path" },
+  "claude-code": { flag: "--resume", kind: "id" },
+  claude: { flag: "--resume", kind: "id" },
   codex: { resume: "resume", kind: "id" },
 };
 
@@ -29,11 +29,8 @@ Options
   --machines         Run hc machine add for machines herdr knows and hc does not
   --only <ids>       Comma list of herdr workspace ids, e.g. wK,wT
   --force            Re-import workspaces the ledger says are done
-  --include-live     Let a new pane resume a session herdr is running right now:
-                     two programs writing one session file. Opt in knowingly.
-  --watch            Keep herdr-app in step with herdr while you use both:
-                     new workspaces, tabs and renames are mirrored as they happen.
-                     Nothing is ever closed or killed. Ctrl+C stops watching.
+  --in <file>        A herdr session.json instead of the live TUI: use this once
+                     herdr is stopped, which is when the handover is safe.
   --json             Print the plan or the result as JSON
   -h, --help         This text
 
@@ -50,7 +47,6 @@ function main(argv) {
     out(opts.json ? JSON.stringify({ spaces: [], machines: [] }, null, 2) : "Nothing to import: herdr has no workspaces or machines this tool has not seen.");
     return 0;
   }
-  if (opts.watch) return watch(opts);
   if (!opts.apply) {
     opts.json ? out(JSON.stringify(plan, null, 2)) : printPlan(plan);
     return 0;
@@ -61,7 +57,7 @@ function main(argv) {
 // ---- arguments and sources
 
 function parseArgs(argv) {
-  const opts = { apply: false, agents: "resume", machines: false, force: false, json: false, help: false, in: null, only: null, includeLive: false, watch: false };
+  const opts = { apply: false, agents: "resume", machines: false, force: false, json: false, help: false, in: null, only: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => {
@@ -73,8 +69,6 @@ function parseArgs(argv) {
     else if (a === "--machines") opts.machines = true;
     else if (a === "--force") opts.force = true;
     else if (a === "--json") opts.json = true;
-    else if (a === "--include-live") opts.includeLive = true;
-    else if (a === "--watch") opts.watch = true;
     else if (a === "-h" || a === "--help") opts.help = true;
     else if (a === "--in") opts.in = next();
     else if (a === "--only") opts.only = next().split(",").map((s) => s.trim()).filter(Boolean);
@@ -98,7 +92,39 @@ function readSnapshot(file) {
   return unwrap(JSON.parse(readFileSync(file, "utf8")));
 }
 
+/// herdr's own session.json is what survives the TUI being closed, so it is the
+/// right source for a handover. Shaped like a snapshot, so one plan builder
+/// serves both: a stopped agent has no runtime status, which reads as resumable.
+function fromSessionFile(doc) {
+  if (!Array.isArray(doc?.workspaces) || !doc.workspaces.every((w) => Array.isArray(w.tabs))) return null;
+  const workspaces = [];
+  const tabs = [];
+  const panes = [];
+  doc.workspaces.forEach((ws, i) => {
+    workspaces.push({ workspace_id: ws.id, number: i + 1, label: ws.custom_name || "", tab_count: ws.tabs.length });
+    ws.tabs.forEach((tab, j) => {
+      const tabId = `${ws.id}:t${j + 1}`;
+      tabs.push({ tab_id: tabId, workspace_id: ws.id, number: j + 1, label: tab.custom_name || "" });
+      for (const [key, pane] of Object.entries(tab.panes ?? {})) {
+        if (!pane?.cwd) continue;
+        panes.push({
+          pane_id: `${ws.id}:p${key}`,
+          tab_id: tabId,
+          workspace_id: ws.id,
+          cwd: pane.cwd,
+          agent: pane.agent_session?.agent ?? null,
+          agent_session: pane.agent_session ?? null,
+          agent_status: null,
+        });
+      }
+    });
+  });
+  return { workspaces, tabs, panes };
+}
+
 function unwrap(doc) {
+  const fromFile = fromSessionFile(doc);
+  if (fromFile) return fromFile;
   const snap = doc?.result?.snapshot ?? doc?.snapshot ?? doc;
   if (!snap?.workspaces || !snap?.tabs || !snap?.panes) throw new Error("that is not a herdr snapshot: workspaces, tabs and panes are missing");
   return snap;
@@ -163,8 +189,12 @@ function panePlan(pane, opts) {
     plan.note = `${pane.agent} session not resumed (--agents shell)`;
     return plan;
   }
+  if (live) {
+    plan.note = `${plan.agent} is still running in herdr: close it there, then import`;
+    return plan;
+  }
   if (!recipe) {
-    plan.note = `${pane.agent} has no resume recipe here: opened as a shell`;
+    plan.note = `${plan.agent} has no resume recipe here: opened as a shell`;
     return plan;
   }
   if (!session?.value || session.kind !== recipe.kind) {
@@ -175,17 +205,7 @@ function panePlan(pane, opts) {
     plan.note = `session file is gone: ${session.value}`;
     return plan;
   }
-  if (live && !opts.includeLive) {
-    if (!recipe.fork) {
-      plan.note = `${pane.agent} is live in herdr now and has no fork flag here: opened as a shell`;
-      return plan;
-    }
-    plan.argv = [pane.agent, recipe.fork, session.value];
-    plan.note = "forked: herdr keeps the original, this pane gets its own copy";
-    return plan;
-  }
   plan.argv = recipe.resume ? [pane.agent, recipe.resume, session.value] : [pane.agent, recipe.flag, session.value];
-  if (live) plan.note = "herdr runs this session too (--include-live): two programs write one file";
   return plan;
 }
 
@@ -222,7 +242,15 @@ function sshTarget(raw) {
 // ---- apply
 
 function apply(plan, opts) {
-  preflight();
+  if (plan.liveSkipped) {
+    const live = plan.spaces.flatMap((s) => s.tabs.flatMap((t) => t.panes)).filter((p) => p.live);
+    throw new Error(
+      `${plan.liveSkipped} agent(s) still run in herdr. Stop them first: one session cannot be resumed in two places.\n` +
+        live.map((p) => `  ${p.agent}  ${p.cwd}`).join("\n") +
+        "\nClose those tabs in herdr, then run this again.",
+    );
+  }
+  if (plan.spaces.length) preflight();
 
   const results = { spaces: [], machines: [], errors: [] };
 
@@ -341,122 +369,6 @@ function preflight() {
   }
   const hc = run("hc", ["server", "status"]);
   if (hc.code !== 0) throw new Error(`herdr-core is not running: ${(hc.stderr || hc.stdout).trim()}\nStart it with: hc server start`);
-}
-
-// ---- watch: keep both windows, herdr stays the source of truth
-//
-// Realtime events are used as invalidation signals only. Every event triggers
-// an authoritative session.snapshot read (herdr's own guidance), and the diff
-// against the ledger decides what to create. Nothing is ever closed: a space
-// whose workspace went away is only marked stale, so terminals survive.
-
-function watch(opts) {
-  const sock = process.env.HERDR_SOCKET_PATH || join(homedir(), ".config", "herdr", "herdr.sock");
-  // Watching means the two windows run side by side, so a new TUI workspace must
-  // not silently spawn a second copy of its agent: shells unless asked for more.
-  const mode = opts.agentsGiven ? opts.agents : "shell";
-  const subjects = mode === "shell" ? "shells, no agent copies" : mode === "skip" ? "no terminals' programs" : "agents carried over";
-  out(`watching herdr → herdr-app (${subjects}). Nothing is closed by this tool. Ctrl+C to stop.`);
-
-  let timer = null;
-  let running = false;
-
-  const schedule = () => {
-    clearTimeout(timer);
-    timer = setTimeout(reconcile, 150);
-  };
-
-  function reconcile() {
-    if (running) return schedule();
-    running = true;
-    try {
-      const plan = buildPlan(liveSnapshot(), { ...opts, agents: mode, apply: true, only: null });
-      const created = [];
-      const errors = [];
-      for (const space of plan.spaces) {
-        const made = createSpace(space, errors);
-        if (!made) continue;
-        const ledger = readLedger();
-        ledger.spaces[space.sourceId] = { space: made.space, name: space.name, tabs: made.tabs, at: new Date().toISOString(), watch: true };
-        writeLedger(ledger);
-        created.push(space.name || space.folder);
-      }
-      renameChanged();
-      if (created.length) out(`mirrored ${created.length}: ${created.join(", ")}`);
-      if (errors.length) out(`cannot mirror yet: ${errors[0].why}`);
-    } catch (error) {
-      out(`waiting: ${error.message.split("\n")[0]}`);
-    } finally {
-      running = false;
-    }
-  }
-
-  // A rename in herdr becomes a rename in the app, matched through the ledger.
-  function renameChanged() {
-    const snap = liveSnapshot();
-    const ledger = readLedger();
-    let touched = false;
-    for (const ws of snap.workspaces) {
-      const entry = ledger.spaces[ws.workspace_id];
-      if (!entry) continue;
-      const name = ownName(ws.label, null);
-      if (name && name !== entry.name) {
-        const r = appDo("space.rename", { id: entry.space, name });
-        if (!r.error) {
-          entry.name = name;
-          touched = true;
-        }
-      }
-    }
-    if (touched) writeLedger(ledger);
-  }
-
-  function connect() {
-    const socket = createConnection(sock);
-    let buffer = "";
-    socket.on("connect", () => {
-      socket.write(`${JSON.stringify({
-        id: "herdr-import-watch",
-        method: "events.subscribe",
-        params: { subscriptions: [
-          { type: "workspace.created" }, { type: "workspace.closed" }, { type: "workspace.renamed" },
-          { type: "workspace.moved" }, { type: "workspace.reordered" },
-          { type: "tab.created" }, { type: "tab.closed" }, { type: "tab.renamed" },
-          { type: "pane.created" }, { type: "pane.closed" },
-        ] },
-      })}\n`);
-      reconcile();
-    });
-    socket.on("data", (chunk) => {
-      buffer += chunk;
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let message;
-        try {
-          message = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (message.error?.code === "events_lost") {
-          out("event history was lost: reading herdr again");
-          socket.destroy();
-          return;
-        }
-        if (message.result?.type === "subscription_started") {
-          out("connected: listening for changes");
-          continue;
-        }
-        if (message.method || message.event) schedule();
-      }
-    });
-    socket.on("close", () => setTimeout(connect, 2000));
-    socket.on("error", () => socket.destroy());
-  }
-
-  connect();
-  return new Promise(() => {});
 }
 
 // ---- reconciling with what the app already has
