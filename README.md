@@ -14,10 +14,13 @@ The app's plugins are mods. Install this one once and the whole handover is
 three clicks:
 
 ```sh
-git clone https://github.com/arhen/herdr-import
-ln -s "$PWD/herdr-import/bin/herdr-import.js" ~/.local/bin/herdr-import
-ln -s "$PWD/herdr-import/mod" ~/.config/herdr-app/mods/herdr-import
+curl -fsSL https://raw.githubusercontent.com/arhen/herdr-import/main/install.sh | sh
 ```
+
+That puts the mod in `~/.config/herdr-app/mods/herdr-import` and the command in
+`~/.local/bin/herdr-import`. It keeps an existing copy aside instead of
+overwriting it, and prints what it placed. Nothing else on your machine is
+touched: no `sudo`, no git, no daemon.
 
 Then in Herdr: **Shift P** (commands) → `mod.open herdr-import` → tick what
 comes over → **Import**. A dialog lists every herdr workspace with its folder,
