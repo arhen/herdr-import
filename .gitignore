@@ -1,1 +1,3 @@
 node_modules/
+# types the app writes beside a mod on start
+mod/*.d.ts
